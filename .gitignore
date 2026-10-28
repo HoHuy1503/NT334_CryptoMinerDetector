@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Log và báo cáo có thể chứa thông tin máy/người dùng
+data/
+
+# Bí mật và cấu hình riêng
+.env
+.env.*
+!.env.example
+*.key
