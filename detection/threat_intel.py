@@ -116,7 +116,7 @@ class ThreatIntelClient:
             indicators.append({
                 "rule_id": "THREAT_INTEL_HASH_MATCH",
                 "points": 60,
-                "details": {key: result.get(key) for key in ("sha256", "signature", "first_seen", "file_type")},
+                "details": {**{key: result.get(key) for key in ("sha256", "signature", "first_seen", "file_type")}, "note": "MalwareBazaar reports known malware reputation; this does not by itself prove crypto-mining activity."},
             })
         enriched["indicators"] = indicators
         enriched["score"] = min(100, int(alert.get("score", 0)) + 60)

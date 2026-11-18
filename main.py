@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import subprocess
 import socket
 import time
 from datetime import datetime, timezone
@@ -13,6 +15,8 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, "system_events.jsonl")
 ALERT_FILE = os.path.join(OUTPUT_DIR, "alerts.jsonl")
 INTERVAL = 3
 CPU_STREAKS = {}
+IDLE_CPU_STREAKS = {}
+GPU_STREAKS = {}
 CONNECTION_STREAKS = {}
 THREAT_INTEL = ThreatIntelClient(os.environ.get("MALWAREBAZAAR_AUTH_KEY"))
 SESSION = {"snapshots": 0, "alerts": 0, "high": 0, "medium": 0, "low": 0}
@@ -30,14 +34,79 @@ def safe_value(func, default=None):
         return default
 
 
+MINER_COMMAND_LINE_MARKERS = {
+    "STRATUM_POOL_URI": ("stratum+tcp://", "stratum+ssl://", "stratum+tls://", "stratum://"),
+}
+
+
+def get_command_line_indicators(proc):
+    command_parts = safe_value(proc.cmdline, []) or []
+    if not isinstance(command_parts, (list, tuple)):
+        return []
+    command_text = " ".join(str(part) for part in command_parts).casefold()
+    return [
+        indicator
+        for indicator, markers in MINER_COMMAND_LINE_MARKERS.items()
+        if any(marker in command_text for marker in markers)
+    ]
+
+
+def collect_gpu_usage_by_pid():
+    """Return the highest Windows GPU-engine utilization grouped by PID."""
+    if os.name != "nt":
+        return {}
+    command = r"$ErrorActionPreference='Stop'; (Get-Counter '\GPU Engine(*)\Utilization Percentage').CounterSamples | Select-Object InstanceName,CookedValue | ConvertTo-Json -Compress"
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True, text=True, timeout=4,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+        samples = json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        return {}
+
+    if isinstance(samples, dict):
+        samples = [samples]
+    if not isinstance(samples, list):
+        return {}
+    usage_by_pid_and_engine = {}
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        instance = str(sample.get("InstanceName") or "")
+        match = re.match(r"pid_(\d+)_.*_engtype_(.*)$", instance, re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            pid = int(match.group(1))
+            percent = max(0.0, float(sample.get("CookedValue") or 0))
+        except (TypeError, ValueError):
+            continue
+        engine_type = match.group(2).strip().casefold() or "unknown"
+        key = (pid, engine_type)
+        usage_by_pid_and_engine[key] = usage_by_pid_and_engine.get(key, 0.0) + percent
+
+    best_by_pid = {}
+    for (pid, engine_type), percent in usage_by_pid_and_engine.items():
+        candidate = {"percent": round(min(percent, 100.0), 1), "engine_type": engine_type}
+        if pid not in best_by_pid or candidate["percent"] > best_by_pid[pid]["percent"]:
+            best_by_pid[pid] = candidate
+    return best_by_pid
+
+
 def collect_processes():
     processes = []
+    psutil.cpu_percent(interval=None)
     for proc in psutil.process_iter():
         try:
             with proc.oneshot():
                 processes.append({
                     "timestamp": get_timestamp(), "pid": proc.pid,
                     "ppid": safe_value(proc.ppid), "name": safe_value(proc.name),
+                    "command_line_indicators": get_command_line_indicators(proc),
                     "exe": safe_value(proc.exe), "username": safe_value(proc.username),
                     "cpu_percent": proc.cpu_percent(),
                     "memory_percent": safe_value(proc.memory_percent),
@@ -86,33 +155,47 @@ def print_session_summary():
     print("Alert log:", ALERT_FILE)
 
 
-def main():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print("=== CryptoMiner Detector ===")
-    print("OS:", os.name, "| Host:", socket.gethostname())
-    print("Snapshot log:", OUTPUT_FILE, "| Alerts:", ALERT_FILE)
-    print("Sampling interval:", INTERVAL, "seconds | Stop with Ctrl+C.\n")
-    print("Hash reputation lookup:", "enabled (hash only, for flagged processes)" if THREAT_INTEL.enabled else "disabled (set MALWAREBAZAAR_AUTH_KEY to opt in)")
+def main(stop_event=None, event_callback=None):
+    def emit(kind, payload):
+        if event_callback is not None:
+            event_callback(kind, payload)
+        elif kind == "alert":
+            print(payload["formatted"])
+        elif kind in {"info", "stopped", "error"}:
+            print(payload)
 
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    emit("info", "=== CryptoMiner Detector ===")
+    emit("info", f"OS: {os.name} | Host: {socket.gethostname()}")
+    emit("info", f"Snapshot log: {OUTPUT_FILE} | Alerts: {ALERT_FILE}")
+    emit("info", f"Sampling interval: {INTERVAL} seconds")
+    emit("info", "MalwareBazaar: " + ("enabled" if THREAT_INTEL.enabled else "disabled"))
+
+    psutil.cpu_percent(interval=None)
     for proc in psutil.process_iter():
         safe_value(proc.cpu_percent)
 
     try:
-        while True:
+        while stop_event is None or not stop_event.is_set():
             started = time.monotonic()
             processes = collect_processes()
             connections = collect_connections()
+            system_cpu_percent = psutil.cpu_percent(interval=None)
+            gpu_usage_by_pid = collect_gpu_usage_by_pid()
+            for process in processes:
+                gpu_usage = gpu_usage_by_pid.get(process.get("pid"), {})
+                process["gpu_engine_percent"] = gpu_usage.get("percent")
+                process["gpu_engine_type"] = gpu_usage.get("engine_type")
             event = {
-                "timestamp": get_timestamp(),
-                "hostname": socket.gethostname(),  # hostname string, not a PID dict
+                "timestamp": get_timestamp(), "hostname": socket.gethostname(),
                 "os": os.name, "event_type": "system_snapshot",
+                "system_cpu_percent": system_cpu_percent,
                 "process_count": len(processes), "processes": processes,
                 "connections": connections,
             }
             write_jsonl(OUTPUT_FILE, event)
             SESSION["snapshots"] += 1
 
-            # PID 0 is the idle process; its CPU value is idle capacity, not load.
             for proc in processes:
                 pid = proc.get("pid")
                 if pid in (None, 0):
@@ -127,27 +210,41 @@ def main():
                 row["samples"] += 1
                 row["average_cpu"] = row["total_cpu"] / row["samples"]
 
-            # Keep CPU streak counters across snapshots during this run only.
             alerts = detect(event, cpu_streaks=CPU_STREAKS,
-                            connection_streaks=CONNECTION_STREAKS)
+                            connection_streaks=CONNECTION_STREAKS,
+                            idle_cpu_streaks=IDLE_CPU_STREAKS,
+                            gpu_streaks=GPU_STREAKS)
             for alert in alerts:
-                # Hash lookup runs in a background worker and never uploads the executable.
                 alert = THREAT_INTEL.enrich_alert(alert)
-                print("ALERT:", format_alert(alert))
+                formatted = format_alert(alert)
+                emit("alert", {"formatted": formatted, "alert": alert})
                 write_jsonl(ALERT_FILE, {"event_type": "detection_alert", **alert})
                 SESSION["alerts"] += 1
                 SESSION[alert["severity"]] += 1
 
             top = sorted((p for p in processes if p.get("pid") != 0),
-                         key=lambda p: p["cpu_percent"] or 0, reverse=True)[:5]
-            print(f"\nTime: {event['timestamp']} | Host: {event['hostname']} | Processes: {len(processes)} | Connections: {len(connections)} | Alerts: {len(alerts)}")
-            print("Top CPU processes:")
-            for proc in top:
-                print(f"  PID={proc['pid']:<7} CPU={proc['cpu_percent']:>6.1f}% RAM={proc['memory_percent'] or 0:>5.1f}% Name={proc['name']}")
-            time.sleep(max(0, INTERVAL - (time.monotonic() - started)))
+                         key=lambda p: p.get("cpu_percent") or 0, reverse=True)[:5]
+            status = {
+                "timestamp": event["timestamp"], "hostname": event["hostname"],
+                "processes": len(processes), "connections": len(connections),
+                "alerts": SESSION["alerts"], "system_cpu_percent": system_cpu_percent,
+                "top_cpu": [{"pid": p.get("pid"), "name": p.get("name"),
+                             "cpu": p.get("cpu_percent") or 0,
+                             "gpu": p.get("gpu_engine_percent")} for p in top],
+            }
+            emit("status", status)
+            delay = max(0, INTERVAL - (time.monotonic() - started))
+            if stop_event is None:
+                time.sleep(delay)
+            else:
+                stop_event.wait(delay)
     except KeyboardInterrupt:
-        print("\nStopped. Log saved to:", OUTPUT_FILE)
-        print_session_summary()
+        pass
+    except Exception as exc:
+        emit("error", f"Monitor error: {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        emit("stopped", f"Stopped. Snapshot log: {OUTPUT_FILE} | Alert log: {ALERT_FILE}")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,16 @@ SUSPICIOUS_PROCESS_NAMES = {"xmrig", "minerd", "cpuminer", "phoenixminer", "nbmi
 COMMON_POOL_PORTS = {3333, 4444, 5555, 7777, 14444, 14433}
 CPU_HIGH_PERCENT = 80.0
 CPU_HIGH_STREAK = 5
+IDLE_SYSTEM_CPU_MAX = 20.0
+PROCESS_CPU_WHILE_IDLE_MIN = 20.0
+IDLE_CPU_REQUIRED_SAMPLES = 10
+GPU_HIGH_PERCENT = 60.0
+GPU_HIGH_REQUIRED_SAMPLES = 10
 PUBLIC_CONNECTION_STREAK = 10
+INACTIVE_CONNECTION_STATES = {
+    "CLOSE_WAIT", "TIME_WAIT", "FIN_WAIT1", "FIN_WAIT2",
+    "CLOSING", "CLOSED", "LAST_ACK",
+}
 LOW_REPUTATION_PATHS = ("\\appdata\\local\\temp\\", "\\appdata\\roaming\\",
                         "\\windows\\temp\\", "\\users\\public\\")
 
@@ -42,7 +51,9 @@ def _process_identity(proc: dict[str, Any], pid: int) -> tuple[Any, ...]:
 
 
 def detect(snapshot: dict[str, Any], cpu_streaks: dict[Any, int] | None = None,
-           connection_streaks: dict[Any, dict[str, int]] | None = None) -> list[dict[str, Any]]:
+           connection_streaks: dict[Any, dict[str, int]] | None = None,
+           idle_cpu_streaks: dict[Any, int] | None = None,
+           gpu_streaks: dict[Any, int] | None = None) -> list[dict[str, Any]]:
     """Evaluate a snapshot. Pass a persistent cpu_streaks dict between calls.
 
     The caller owns this in-memory state; no process is ever changed or stopped.
@@ -77,6 +88,14 @@ def detect(snapshot: dict[str, Any], cpu_streaks: dict[Any, int] | None = None,
             process_identities[process_pid] = _process_identity(process, process_pid)
 
     current_cpu_identities = set(process_identities.values())
+    if gpu_streaks is not None:
+        for previous_identity in list(gpu_streaks):
+            if previous_identity not in current_cpu_identities:
+                gpu_streaks.pop(previous_identity, None)
+    if idle_cpu_streaks is not None:
+        for previous_identity in list(idle_cpu_streaks):
+            if previous_identity not in current_cpu_identities:
+                idle_cpu_streaks.pop(previous_identity, None)
     if cpu_streaks is not None:
         for previous_identity in list(cpu_streaks):
             if previous_identity not in current_cpu_identities:
@@ -145,6 +164,41 @@ def detect(snapshot: dict[str, Any], cpu_streaks: dict[Any, int] | None = None,
                                 "threshold_percent": CPU_HIGH_PERCENT,
                                 "required_samples": CPU_HIGH_STREAK}})
 
+        if idle_cpu_streaks is not None and identity is not None:
+            try:
+                system_cpu = float(snapshot.get("system_cpu_percent"))
+            except (TypeError, ValueError):
+                system_cpu = None
+            if (system_cpu is not None and system_cpu <= IDLE_SYSTEM_CPU_MAX
+                    and cpu_percent >= PROCESS_CPU_WHILE_IDLE_MIN):
+                idle_cpu_streaks[identity] = idle_cpu_streaks.get(identity, 0) + 1
+            else:
+                idle_cpu_streaks.pop(identity, None)
+            if idle_cpu_streaks.get(identity, 0) >= IDLE_CPU_REQUIRED_SAMPLES:
+                score += 20
+                indicators.append({"rule_id": "SUSTAINED_PROCESS_CPU_WHILE_SYSTEM_IDLE", "points": 20,
+                    "details": {"process_cpu_percent": cpu_percent, "system_cpu_percent": system_cpu,
+                                "consecutive_samples": idle_cpu_streaks[identity],
+                                "required_samples": IDLE_CPU_REQUIRED_SAMPLES}})
+
+        if gpu_streaks is not None and identity is not None:
+            try:
+                gpu_percent = float(proc.get("gpu_engine_percent"))
+            except (TypeError, ValueError):
+                gpu_percent = 0.0
+            if gpu_percent >= GPU_HIGH_PERCENT:
+                gpu_streaks[identity] = gpu_streaks.get(identity, 0) + 1
+            else:
+                gpu_streaks.pop(identity, None)
+            if gpu_streaks.get(identity, 0) >= GPU_HIGH_REQUIRED_SAMPLES:
+                score += 20
+                indicators.append({"rule_id": "SUSTAINED_GPU_ENGINE_ACTIVITY", "points": 20,
+                    "details": {"gpu_engine_percent": gpu_percent,
+                                "gpu_engine_type": proc.get("gpu_engine_type"),
+                                "consecutive_samples": gpu_streaks[identity],
+                                "required_samples": GPU_HIGH_REQUIRED_SAMPLES,
+                                "note": "Sustained GPU activity can also come from games or compute workloads."}})
+
         normalized_exe = exe.replace("/", "\\").casefold()
         path_markers = [marker for marker in LOW_REPUTATION_PATHS if marker in normalized_exe]
         if path_markers:
@@ -153,13 +207,29 @@ def detect(snapshot: dict[str, Any], cpu_streaks: dict[Any, int] | None = None,
                 "details": {"executable_path": exe, "matched_location_patterns": path_markers,
                             "note": "Location is an investigation hint, not proof of maliciousness."}})
 
-        if name.lower() in SUSPICIOUS_PROCESS_NAMES:
+        normalized_name = name.replace(chr(92), "/").rsplit("/", 1)[-1].casefold()
+        if normalized_name.endswith(".exe"):
+            normalized_name = normalized_name[:-4]
+
+        if normalized_name in SUSPICIOUS_PROCESS_NAMES:
             score += 60
             indicators.append({"rule_id": "MINER_PROCESS_NAME", "points": 60,
-                "details": {"matched_name": name, "match": "exact, case-insensitive"}})
+                "details": {
+                    "matched_name": name,
+                    "normalized_name": normalized_name,
+                    "match": "exact, case-insensitive, optional .exe suffix removed",
+                }})
+        command_line_indicators = proc.get("command_line_indicators", [])
+        if isinstance(command_line_indicators, list) and "STRATUM_POOL_URI" in command_line_indicators:
+            score += 40
+            indicators.append({"rule_id": "MINING_STRATUM_COMMAND_LINE", "points": 40,
+                "details": {"matched_pattern": "stratum pool URI", "raw_command_line_logged": False}})
 
         matches = []
         for conn in by_pid.get(pid, []) if pid is not None else []:
+            status = str(conn.get("status") or "").upper()
+            if status in INACTIVE_CONNECTION_STATES:
+                continue
             port = _get_port(conn.get("remote_address"))
             if port in COMMON_POOL_PORTS:
                 matches.append({"remote_address": conn.get("remote_address"),
