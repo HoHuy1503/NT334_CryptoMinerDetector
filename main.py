@@ -6,6 +6,7 @@ import socket
 import time
 from datetime import datetime, timezone
 
+from detection.trace import trace_alert
 import psutil
 from detection.rule_engine import detect, format_alert
 from detection.threat_intel import ThreatIntelClient
@@ -214,7 +215,9 @@ def main(stop_event=None, event_callback=None):
                             connection_streaks=CONNECTION_STREAKS,
                             idle_cpu_streaks=IDLE_CPU_STREAKS,
                             gpu_streaks=GPU_STREAKS)
+            by_pid = {p["pid"]: p for p in processes} if alerts else {}
             for alert in alerts:
+                alert["trace"] = trace_alert(alert, by_pid, connections)
                 alert = THREAT_INTEL.enrich_alert(alert)
                 formatted = format_alert(alert)
                 emit("alert", {"formatted": formatted, "alert": alert})

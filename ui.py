@@ -1,10 +1,14 @@
 """Desktop interface for CryptoMinerDetector."""
+import os
+from pathlib import Path
 import queue
 import threading
 from datetime import datetime
 import tkinter as tk
 from tkinter import ttk
 
+from tkinter import messagebox
+from detection.trace import trace_text
 import main as monitor
 
 
@@ -77,8 +81,10 @@ class DetectorApp:
         self.alerts.configure(yscrollcommand=scroll.set)
         self.alerts.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self.alerts.bind("<Double-Button-1>", self.open_process_folder)
         self.alerts.bind("<Button-3>", self.show_alert_context_menu)
         self.alert_context_menu = tk.Menu(root, tearoff=False)
+        self.alert_context_menu.add_command(label="Xem truy vết", command=self.show_trace)
         self.alert_context_menu.add_command(label="Copy tên tiến trình", command=self.copy_selected_process_name)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.after(200, self.process_events)
@@ -102,6 +108,46 @@ class DetectorApp:
         self.root.clipboard_append(process_name)
         self.status_var.set(f"Đã sao chép tên tiến trình: {process_name}")
         return "break"
+
+    def alert_for_row(self, row):
+        return next((r["latest_alert"] for r in self.process_rows.values()
+                     if r.get("row_id") == row), {})
+
+    def open_process_folder(self, event):
+        if self.alerts.identify_region(event.x, event.y) != "cell":
+            return
+        row = self.alerts.identify_row(event.y)
+        path = Path(self.alert_for_row(row).get("executable_path") or "")
+        try:
+            if not path.is_absolute() or len(path.drive) != 2 or not path.parent.is_dir():
+                raise FileNotFoundError
+            os.startfile(str(path.parent))
+        except (OSError, ValueError):
+            messagebox.showwarning("Thư mục tiến trình",
+                                   "Không thể mở thư mục cục bộ của tệp đã ghi nhận.",
+                                   parent=self.root)
+
+    def show_trace(self):
+        selected = self.alerts.selection()
+        if not selected:
+            return
+        window = tk.Toplevel(self.root)
+        window.title("Truy vết tại lần cảnh báo gần nhất")
+        window.transient(self.root)
+        window.geometry(f"{min(1100, window.winfo_screenwidth()-60)}x{min(560, window.winfo_screenheight()-100)}")
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+        body = tk.Text(window, wrap="none", padx=16, pady=14, font=("Segoe UI", 11))
+        body.grid(row=0, column=0, sticky="nsew")
+        horizontal = ttk.Scrollbar(window, orient="horizontal", command=body.xview)
+        vertical = ttk.Scrollbar(window, orient="vertical", command=body.yview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        body.configure(xscrollcommand=horizontal.set, yscrollcommand=vertical.set)
+        body.insert("1.0", trace_text(self.alert_for_row(selected[0])))
+        body.configure(state="disabled")
+        ttk.Button(window, text="Đóng", command=window.destroy).grid(row=2, column=0, sticky="e", padx=10, pady=8)
+        window.bind("<Escape>", lambda event: window.destroy())
 
     def show_alert_context_menu(self, event):
         row = self.alerts.identify_row(event.y)
@@ -195,6 +241,7 @@ class DetectorApp:
                         "last_seen": alert.get("timestamp", ""), "indicators": set(),
                     }
                     self.process_rows[identity] = record
+                record["latest_alert"] = alert
                 record["count"] += 1
                 record["last_seen"] = alert.get("timestamp", "")
                 record["score"] = max(record["score"], alert.get("score", 0))
