@@ -5,11 +5,23 @@ import queue
 import threading
 from datetime import datetime
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, font
 
 from tkinter import messagebox
 from detection.trace import trace_text
+import live_capture
+from pcap_panel import CapturePanel
 import main as monitor
+
+
+DISPLAY_TIME_FORMAT = "%d/%m/%Y %H:%M:%S"
+
+
+def display_time(value):
+    try:
+        return datetime.fromisoformat(value).strftime(DISPLAY_TIME_FORMAT)
+    except (TypeError, ValueError):
+        return ""
 
 
 class DetectorApp:
@@ -31,10 +43,18 @@ class DetectorApp:
         if "vista" in style.theme_names():
             style.theme_use("vista")
 
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            font.nametofont(name).configure(family="Segoe UI", size=12)
+        root.option_add("*TCombobox*Listbox.font", "TkTextFont")
+        for widget in ("TButton", "TLabel", "TNotebook.Tab", "TLabelframe.Label", "TCombobox", "Treeview"):
+            style.configure(widget, font="TkDefaultFont")
+        style.configure("Treeview.Heading", font="TkHeadingFont")
+        style.configure("Treeview", rowheight=font.nametofont("TkDefaultFont").metrics("linespace") + 8)
+
         header = ttk.Frame(root, padding=(16, 14))
         header.pack(fill="x")
-        ttk.Label(header, text="CryptoMinerDetector", font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(header, text="Giám sát hành vi tiến trình, CPU, GPU và kết nối mạng", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 0))
+        ttk.Label(header, text="CryptoMinerDetector", font=("Segoe UI", 21, "bold")).pack(anchor="w")
+        ttk.Label(header, text="Giám sát hành vi tiến trình, CPU, GPU và kết nối mạng", font=("Segoe UI", 12)).pack(anchor="w", pady=(3, 0))
 
         self.tabs = ttk.Notebook(root)
         self.tabs.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -45,7 +65,12 @@ class DetectorApp:
 
         controls = ttk.Frame(self.monitor_tab, padding=(8, 4))
         controls.pack(fill="x")
-        self.start_button = ttk.Button(controls, text="Bắt đầu giám sát", command=self.start_monitor)
+        self.adapter = ttk.Combobox(controls, width=26, state="readonly", font="TkTextFont")
+        self.adapter.pack(side="left", padx=4)
+        self.interface_ids = {}
+        self.adapter.set("Đang tải card mạng…")
+        self.start_button = ttk.Button(controls, text="Bắt đầu giám sát",
+                                       command=self.start_monitor, state="disabled")
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(controls, text="Dừng", command=self.stop_monitor, state="disabled")
         self.stop_button.pack(side="left", padx=(8, 0))
@@ -59,15 +84,22 @@ class DetectorApp:
 
         log_frame = ttk.LabelFrame(self.monitor_tab, text="Nhật ký giám sát trực tiếp", padding=8)
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.log = tk.Text(log_frame, height=12, wrap="word", state="disabled", font=("Consolas", 9))
+        self.log = tk.Text(log_frame, height=12, wrap="word", state="disabled", font=("Consolas", 12))
         self.log.pack(fill="both", expand=True)
 
-        stats_frame = ttk.LabelFrame(self.results_tab, text="Thống kê theo tiến trình", padding=8)
+        views = ttk.Notebook(self.results_tab)
+        views.pack(fill="both", expand=True)
+        processes = ttk.Frame(views)
+        views.add(processes, text="Tiến trình")
+        self.capture_panel = CapturePanel(views)
+        views.add(self.capture_panel, text="Lưu lượng PCAP")
+
+        stats_frame = ttk.LabelFrame(processes, text="Thống kê theo tiến trình", padding=8)
         stats_frame.pack(fill="x", pady=(0, 8))
         self.stats_var = tk.StringVar(value="Sự kiện cảnh báo: 0  |  Tiến trình: 0  |  Mức cao: 0  |  Trung bình: 0  |  Thấp: 0")
         ttk.Label(stats_frame, textvariable=self.stats_var).pack(anchor="w")
 
-        alerts_frame = ttk.LabelFrame(self.results_tab, text="Tổng hợp kết quả phát hiện", padding=8)
+        alerts_frame = ttk.LabelFrame(processes, text="Tổng hợp kết quả phát hiện", padding=8)
         alerts_frame.pack(fill="both", expand=True)
         cols = ("process", "pid", "severity", "score", "count", "first_seen", "last_seen", "indicators")
         self.alerts = ttk.Treeview(alerts_frame, columns=cols, show="headings", height=14)
@@ -87,7 +119,18 @@ class DetectorApp:
         self.alert_context_menu.add_command(label="Xem truy vết", command=self.show_trace)
         self.alert_context_menu.add_command(label="Copy tên tiến trình", command=self.copy_selected_process_name)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
-        self.root.after(200, self.process_events)
+        self.root.after(50, self.process_events)
+        self.root.after_idle(self.load_interfaces)
+
+    def load_interfaces(self):
+        def load():
+            try:
+                choices = live_capture.interface_names(live_capture.interfaces())
+            except (OSError, live_capture.subprocess.SubprocessError):
+                choices = {}
+            self.events.put(("interfaces", choices))
+
+        threading.Thread(target=load, daemon=True).start()
 
     def append_log(self, message):
         self.log.configure(state="normal")
@@ -137,7 +180,7 @@ class DetectorApp:
         window.geometry(f"{min(1100, window.winfo_screenwidth()-60)}x{min(560, window.winfo_screenheight()-100)}")
         window.columnconfigure(0, weight=1)
         window.rowconfigure(0, weight=1)
-        body = tk.Text(window, wrap="none", padx=16, pady=14, font=("Segoe UI", 11))
+        body = tk.Text(window, wrap="none", padx=16, pady=14, font=("Segoe UI", 13))
         body.grid(row=0, column=0, sticky="nsew")
         horizontal = ttk.Scrollbar(window, orient="horizontal", command=body.xview)
         vertical = ttk.Scrollbar(window, orient="vertical", command=body.yview)
@@ -161,6 +204,8 @@ class DetectorApp:
 
         def sort_key(item):
             value = self.alerts.set(item, column)
+            if column in {"first_seen", "last_seen"}:
+                return datetime.strptime(value, DISPLAY_TIME_FORMAT) if value else datetime.min
             if column in {"pid", "score", "count"}:
                 try:
                     return (0, float(value))
@@ -187,15 +232,32 @@ class DetectorApp:
     def start_monitor(self):
         if self.worker and self.worker.is_alive():
             return
+        adapter = self.adapter.get()
+        interface = self.interface_ids.get(adapter)
+        if not interface:
+            messagebox.showwarning("Card mạng", "Chưa có card mạng để ghi gói. Kiểm tra Npcap rồi mở lại ứng dụng.", parent=self.root)
+            return
+        self.adapter.configure(state="disabled")
         self.stop_event = threading.Event()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.status_var.set("Đang khởi động...")
-        self.append_log("Bắt đầu giám sát.")
+        self.append_log(f"Bắt đầu giám sát tiến trình và ghi lưu lượng trên {adapter}.")
 
         def run():
             try:
-                monitor.main(self.stop_event, lambda kind, payload: self.events.put((kind, payload)))
+                emit = lambda kind, payload: self.events.put((kind, payload))
+                monitor_done = threading.Event()
+                capture = threading.Thread(target=live_capture.session,
+                                           args=(interface, self.stop_event, emit, monitor_done))
+                capture.start()
+                try:
+                    monitor.main(self.stop_event, lambda k, v: emit(k, v) if k != "stopped" else None)
+                finally:
+                    self.stop_event.set()
+                    monitor_done.set()
+                    capture.join()
+                    emit("stopped", "Đã kết thúc phiên giám sát.")
             except Exception as exc:
                 self.events.put(("error", f"Không thể tiếp tục giám sát: {exc}"))
 
@@ -209,20 +271,34 @@ class DetectorApp:
             self.stop_button.configure(state="disabled")
 
     def process_events(self):
-        while True:
+        alerts_changed = False
+        for _ in range(80):
             try:
                 kind, payload = self.events.get_nowait()
             except queue.Empty:
                 break
-            if kind == "info":
+            if kind == "interfaces":
+                self.interface_ids = payload
+                self.adapter["values"] = list(payload)
+                preferred = next((name for name in ("Wi-Fi", "Ethernet") if name in payload),
+                                 next(iter(payload), "Không tìm thấy card mạng"))
+                self.adapter.set(preferred)
+                if payload:
+                    self.start_button.configure(state="normal")
+            elif kind == "info":
                 self.append_log(str(payload))
             elif kind == "status":
-                self.status_var.set("Đang giám sát")
+                if not self.stop_event.is_set():
+                    self.status_var.set("Đang giám sát")
                 self.summary_var.set(
                     f"Máy: {payload['hostname']}  |  Tiến trình: {payload['processes']}  |  "
                     f"Kết nối: {payload['connections']}  |  CPU toàn máy: {payload['system_cpu_percent']:.1f}%  |  "
-                    f"Cảnh báo: {payload['alerts']}  |  Cập nhật: {payload['timestamp']}"
+                    f"Cảnh báo: {payload['alerts']}  |  Cập nhật: {display_time(payload['timestamp'])}"
                 )
+            elif kind == "capture_result":
+                name, rows = payload
+                self.capture_panel.display(name, rows)
+                self.append_log(f"{name}: đã lưu kết quả J48 trong PCAPNG ({len(rows)} bộ ba).")
             elif kind == "alert":
                 alert = payload["alert"]
                 severity = alert.get("severity", "low").upper()
@@ -250,8 +326,8 @@ class DetectorApp:
                     record["severity"] = severity
                 values = (
                     record["process"], record["pid"], record["severity"],
-                    record["score"], record["count"], record["first_seen"],
-                    record["last_seen"], ", ".join(sorted(record["indicators"])),
+                    record["score"], record["count"], display_time(record["first_seen"]),
+                    display_time(record["last_seen"]), ", ".join(sorted(record["indicators"])),
                 )
                 row_id = record.get("row_id")
                 if row_id and self.alerts.exists(row_id):
@@ -260,23 +336,26 @@ class DetectorApp:
                     row_id = self.alerts.insert("", "end", values=values)
                     record["row_id"] = row_id
                 self.alert_count += 1
-                levels = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
-                for process_record in self.process_rows.values():
-                    levels[process_record["severity"]] += 1
-                self.stats_var.set(
-                    f"Sự kiện cảnh báo: {self.alert_count}  |  Tiến trình: {len(self.process_rows)}  |  "
-                    f"Mức cao: {levels['HIGH']}  |  Trung bình: {levels['MEDIUM']}  |  Thấp: {levels['LOW']}"
-                )
-                self.apply_active_sort()
+                alerts_changed = True
                 if self.active_sort is None:
                     self.alerts.see(row_id)
                 self.append_log(payload["formatted"])
             elif kind in {"stopped", "error"}:
                 self.append_log(str(payload))
                 self.status_var.set("Đã dừng" if kind == "stopped" else "Có lỗi")
+                self.adapter.configure(state="readonly")
                 self.start_button.configure(state="normal")
                 self.stop_button.configure(state="disabled")
-        self.root.after(200, self.process_events)
+        if alerts_changed:
+            levels = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+            for process_record in self.process_rows.values():
+                levels[process_record["severity"]] += 1
+            self.stats_var.set(
+                f"Sự kiện cảnh báo: {self.alert_count}  |  Tiến trình: {len(self.process_rows)}  |  "
+                f"Mức cao: {levels['HIGH']}  |  Trung bình: {levels['MEDIUM']}  |  Thấp: {levels['LOW']}"
+            )
+            self.apply_active_sort()
+        self.root.after(80 if self.events.empty() else 10, self.process_events)
 
     def close(self):
         if self.worker and self.worker.is_alive():

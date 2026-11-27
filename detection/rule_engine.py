@@ -85,6 +85,8 @@ def detect(snapshot: dict[str, Any], cpu_streaks: dict[Any, int] | None = None,
                 process_pid = int(process["pid"])
             except (KeyError, TypeError, ValueError):
                 continue
+            if process_pid == 0:
+                continue
             process_identities[process_pid] = _process_identity(process, process_pid)
 
     current_cpu_identities = set(process_identities.values())
@@ -137,6 +139,8 @@ def detect(snapshot: dict[str, Any], cpu_streaks: dict[Any, int] | None = None,
             pid = int(proc["pid"]) if proc.get("pid") is not None else None
         except (TypeError, ValueError):
             pid = None
+        if pid == 0:  # Windows reports unused CPU time through the idle process.
+            continue
         name = str(proc.get("name") or "unknown")
         identity = _process_identity(proc, pid) if pid is not None else None
         exe = str(proc.get("exe") or "")

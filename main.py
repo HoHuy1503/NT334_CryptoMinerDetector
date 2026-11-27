@@ -157,6 +157,9 @@ def print_session_summary():
 
 
 def main(stop_event=None, event_callback=None):
+    def stopping():
+        return stop_event is not None and stop_event.is_set()
+
     def emit(kind, payload):
         if event_callback is not None:
             event_callback(kind, payload)
@@ -177,12 +180,18 @@ def main(stop_event=None, event_callback=None):
         safe_value(proc.cpu_percent)
 
     try:
-        while stop_event is None or not stop_event.is_set():
+        while not stopping():
             started = time.monotonic()
             processes = collect_processes()
+            if stopping():
+                break
             connections = collect_connections()
+            if stopping():
+                break
             system_cpu_percent = psutil.cpu_percent(interval=None)
             gpu_usage_by_pid = collect_gpu_usage_by_pid()
+            if stopping():
+                break
             for process in processes:
                 gpu_usage = gpu_usage_by_pid.get(process.get("pid"), {})
                 process["gpu_engine_percent"] = gpu_usage.get("percent")
@@ -194,6 +203,8 @@ def main(stop_event=None, event_callback=None):
                 "process_count": len(processes), "processes": processes,
                 "connections": connections,
             }
+            if stopping():
+                break
             write_jsonl(OUTPUT_FILE, event)
             SESSION["snapshots"] += 1
 
@@ -211,20 +222,28 @@ def main(stop_event=None, event_callback=None):
                 row["samples"] += 1
                 row["average_cpu"] = row["total_cpu"] / row["samples"]
 
+            if stopping():
+                break
             alerts = detect(event, cpu_streaks=CPU_STREAKS,
                             connection_streaks=CONNECTION_STREAKS,
                             idle_cpu_streaks=IDLE_CPU_STREAKS,
                             gpu_streaks=GPU_STREAKS)
             by_pid = {p["pid"]: p for p in processes} if alerts else {}
             for alert in alerts:
+                if stopping():
+                    break
                 alert["trace"] = trace_alert(alert, by_pid, connections)
                 alert = THREAT_INTEL.enrich_alert(alert)
                 formatted = format_alert(alert)
+                if stopping():
+                    break
                 emit("alert", {"formatted": formatted, "alert": alert})
                 write_jsonl(ALERT_FILE, {"event_type": "detection_alert", **alert})
                 SESSION["alerts"] += 1
                 SESSION[alert["severity"]] += 1
 
+            if stopping():
+                break
             top = sorted((p for p in processes if p.get("pid") != 0),
                          key=lambda p: p.get("cpu_percent") or 0, reverse=True)[:5]
             status = {
