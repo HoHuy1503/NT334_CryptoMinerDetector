@@ -35,6 +35,20 @@ Mở giao diện desktop bằng `python ui.py`.
 
 Dừng chương trình bằng `Ctrl+C`.
 
+## Ghi và phân tích lưu lượng PCAP
+
+Cài Wireshark cùng Npcap (có TShark và Dumpcap), và đưa Java vào PATH. Đặt hai tệp wekaready_miners.csv và wekaready_notminers.csv từ [WEKA-CSV của NESFIT](https://github.com/nesfit/DI-cryptominingdetection/tree/master/WEKA-CSV) trong weka-data. Đặt [Weka 3.8.6](https://repo.maven.apache.org/maven2/nz/ac/waikato/cms/weka/weka-stable/3.8.6/weka-stable-3.8.6.jar) và [Bounce 0.18](https://repo.maven.apache.org/maven2/nz/ac/waikato/cms/weka/thirdparty/bounce/0.18/bounce-0.18.jar) trong weka-jars ở thư mục dự án.
+
+~~~cmd
+if not exist data mkdir data
+.venv\Scripts\python.exe mining_model.py train weka-data weka-jars data\traffic.model
+.venv\Scripts\python.exe ui.py
+~~~
+
+Trong **Giám sát**, chọn card mạng rồi bấm **Bắt đầu giám sát**. Khi bấm **Dừng**, ứng dụng kết thúc lấy mẫu tiến trình trước bước phân tích J48. Bản ghi và kết quả nhúng nằm trong data/pcaps. Xem kết quả trong **Kết quả → Lưu lượng PCAP**, hoặc dùng **Mở PCAP** với bản ghi có sẵn. Trong Wireshark, mở **Statistics → Capture File Properties → Comments** để đọc kết quả nhúng.
+
+Chọn một dòng để xem tám đặc trưng, TCP stream, tên miền TLS/HTTP quan sát được và PID ứng viên nếu ghép được với snapshot cùng phiên. Nhãn J48 được dùng để ưu tiên kiểm tra. PCAP và mô hình được tạo cục bộ trong data/.
+
 ## Tra cứu MalwareBazaar (tùy chọn)
 
 Đặt khóa API trong phiên CMD hiện tại trước khi chạy chương trình:

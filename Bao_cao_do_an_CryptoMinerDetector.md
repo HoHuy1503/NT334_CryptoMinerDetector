@@ -49,7 +49,19 @@ Bản thảo báo cáo khoảng 4,7% mẫu miner bị bỏ sót và 2,6% mẫu k
 
 ### Quan hệ với ứng dụng Windows
 
-Mô-đun phân tích lưu lượng chạy ngoại tuyến bằng CMD. Giao diện Windows dùng bộ luật tiến trình để cung cấp thêm bằng chứng điều tra. Để đưa kết quả J48 lên giao diện trực tiếp, cần bổ sung bước thu flow hoặc đọc PCAP để dựng đúng tám đặc trưng, lưu mốc thời gian và tương quan bộ ba mạng với PID. Snapshot kết nối hiện tại thiếu số byte, số gói và cờ TCP để thực hiện bước này. Các chương tiếp theo mô tả phần máy trạm và phạm vi kiểm thử riêng của phần này.
+Ứng dụng thu gói trên card mạng đã chọn và lấy mẫu tiến trình trong cùng phiên. Khi dừng, bộ quét tiến trình thoát trước khi phân tích J48. TShark đọc PCAPNG, dựng flow có hướng và tổng hợp tám đặc trưng. Ứng dụng hiển thị dự đoán ở tab Lưu lượng PCAP và nhúng kết quả vào phần bình luận của bản ghi. Có thể mở PCAP đã thu để phân tích ngoại tuyến.
+
+Bằng chứng gồm TCP stream liên kết hai chiều, SYN đầu tiên nếu quan sát được, tên miền từ TLS SNI hoặc HTTP Host và PID ứng viên khớp IP/cổng trong snapshot cùng phiên. Với nội dung đọc được, công cụ ghi nhận mining.notify và mining.submit ở hai chiều. Ví dụ, stream 109 trong một phiên cục bộ mang tên miền entitlements.auth.riotgames.com dù J48 gắn cờ chiều phản hồi. Tên miền và PID bổ sung ngữ cảnh xác minh.
+
+### So sánh trọng số J48
+
+| Trọng số | Phát hiện miner | Bỏ sót | Báo nhầm | Recall | Precision |
+|---|---:|---:|---:|---:|---:|
+| Gốc | 109 | 164 | 81 | 39,93% | 57,37% |
+| Trung gian | 230 | 43 | 1.146 | 84,25% | 16,72% |
+| Cân bằng | 246 | 27 | 1.849 | 90,11% | 11,74% |
+
+Ba cấu hình dùng cùng năm fold NESFIT. Ứng dụng dùng cấu hình cân bằng để ưu tiên recall. Luồng phân tích của UI đã chạy trên cgminer.g0.pcapng và gắn cờ 175 trong 1.148 bộ ba. Đây là số dự đoán, chưa có nhãn đối chứng cho từng bộ ba. Phiên ghi loopback đã xác nhận có thể nhúng dự đoán vào PCAPNG và đọc lại. Hướng dẫn dựng mô hình và chạy ứng dụng nằm trong README.md.
 
 ## Phần bổ trợ — Giám sát và truy vết trên máy trạm
 
@@ -152,11 +164,11 @@ Lệnh tái hiện bộ kiểm thử là `.venv\Scripts\python.exe -m unittest -
 
 Trong thử nghiệm tích hợp trước đó, snapshot giả lập có năm dấu hiệu đồng thời đạt 100 điểm. Một truy vấn thử MalwareBazaar với mã băm đã biết trả trạng thái ok và một bản ghi. Phần truy vết được kiểm tra bằng tệp tạm có Zone.Identifier và dữ liệu tiến trình, kết nối giả lập. Kết quả xác nhận đọc được thời điểm tạo tệp, tên miền nguồn và thông tin tương quan. Một lần xem lại nhật ký cũ đọc được 18 snapshot hợp lệ và 0 cảnh báo. Số liệu này thuộc giai đoạn trước khi bổ sung toàn bộ luật hiện tại.
 
-Các lần kiểm tra trên chứng minh các hành vi cụ thể trong điều kiện đã thử. Dự án chưa có tập dữ liệu gán nhãn đủ để báo cáo precision, recall hoặc tỷ lệ cảnh báo sai. XMRig benchmark offline đã được đề xuất cho bài thử CPU thực tế. Chưa có số đo từ lần chạy benchmark đó để đưa vào kết quả.
+Các lần kiểm tra trên chứng minh các hành vi cụ thể trong điều kiện đã thử. Phần giám sát tiến trình chưa có tập dữ liệu gán nhãn đủ để báo cáo precision, recall hoặc tỷ lệ cảnh báo sai riêng. XMRig benchmark offline đã được đề xuất cho bài thử CPU thực tế. Chưa có số đo từ lần chạy benchmark đó để đưa vào kết quả.
 
 ## 8. Hạn chế và hướng phát triển
 
-1. **Cảnh báo sai từ dữ liệu CPU.** Trong một phiên quan sát, System Idle Process (PID 0) xuất hiện với cảnh báo CPU cao. Giá trị này biểu thị thời gian CPU nhàn. Cần loại PID 0 khỏi luật tải CPU và thêm kiểm thử hồi quy. Các tác vụ game, render và biên dịch cũng cần được dùng làm đối chứng.
+1. **Cảnh báo sai từ dữ liệu CPU.** Trong một phiên quan sát, System Idle Process (PID 0) xuất hiện với cảnh báo CPU cao. Giá trị này biểu thị thời gian CPU nhàn. Bộ phát hiện hiện loại PID 0. Phép thử hồi quy qua 12 mẫu liên tiếp xác nhận PID 0 không sinh cảnh báo, còn tiến trình thường có CPU cao vẫn được phát hiện. Các tác vụ game, render và biên dịch cũng cần được dùng làm đối chứng.
 2. **Độ bao phủ của cảm biến.** Tiến trình tồn tại ngắn có thể kết thúc giữa hai lần lấy mẫu. Quyền truy cập và trình điều khiển GPU ảnh hưởng mức dữ liệu thu được. Mã thực thi bên trong tiến trình hợp lệ có thể chỉ được quy về tiến trình chủ.
 3. **Giới hạn của đối chiếu bên ngoài.** Mã băm chưa xuất hiện trong MalwareBazaar vẫn có thể thuộc mẫu mới. Bản ghi mã độc cũng có thể thuộc loại khác ngoài miner. Tra cứu nền cần thời gian, nên kết quả có thể chưa hiện ở cảnh báo đầu tiên.
 4. **Đánh giá thực nghiệm.** Nên ghi nhãn từng phiên chạy miner được cho phép và từng tải hợp lệ, đo thời gian tới cảnh báo đầu, tỷ lệ phát hiện theo tiến trình và số cảnh báo sai mỗi giờ. Cần báo cáo riêng trường hợp thiếu dữ liệu GPU và đo chi phí CPU, RAM, dung lượng nhật ký của chính công cụ.
@@ -164,7 +176,7 @@ Các lần kiểm tra trên chứng minh các hành vi cụ thể trong điều 
 
 ## 9. Kết luận
 
-CryptoMinerDetector đã hình thành một công cụ Windows có thể chạy bằng CMD hoặc giao diện desktop, kết hợp dấu hiệu nhận dạng với hành vi CPU, GPU và mạng. Kết quả quan trọng của đồ án là khả năng giải thích từng cảnh báo, gộp các lần phát hiện của cùng tiến trình và chuyển từ cảnh báo sang kiểm tra tệp cùng bằng chứng liên quan. Để đánh giá khả năng sử dụng lâu dài, bước tiếp theo là khắc phục cảnh báo PID 0 và kiểm chứng các ngưỡng trên tập phiên chạy có nhãn.
+CryptoMinerDetector đã hình thành một công cụ Windows có thể chạy bằng CMD hoặc giao diện desktop, kết hợp dấu hiệu nhận dạng với hành vi CPU, GPU và mạng. Kết quả quan trọng của đồ án là khả năng giải thích từng cảnh báo, gộp các lần phát hiện của cùng tiến trình và chuyển từ cảnh báo sang kiểm tra tệp cùng bằng chứng liên quan. Để đánh giá khả năng sử dụng lâu dài, bước tiếp theo là kiểm chứng các ngưỡng trên tập phiên chạy có nhãn.
 
 ## Tài liệu tham khảo
 
